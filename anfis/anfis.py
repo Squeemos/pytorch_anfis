@@ -3,6 +3,10 @@ from torch import nn
 from torch.nn import functional as F
 from torch import optim
 
+@torch.jit.script
+def gaussian(x, centers, widths):
+    return torch.exp((-(x - centers)**2) / (2 * widths**2))
+
 class AnfisLayer(nn.Module):
     """
         Module for an AnfisLayer in PyTorch
@@ -42,6 +46,7 @@ class AnfisLayer(nn.Module):
             self.register_parameter("centers", nn.Parameter(torch.randn(in_dim, n_rules) * normal_dis_factor))
             self.register_parameter("left_widths", nn.Parameter(torch.rand(in_dim, n_rules) * normal_dis_factor))
             self.register_parameter("right_widths", nn.Parameter(torch.rand(in_dim, n_rules) * normal_dis_factor))
+            self.register_buffer("common_zero", torch.tensor(0.0))
         else:
             # TODO: Add in other membership functions
             raise NotImplementedError(f"AnfisLayer with membership type <{self.membership_type}> is not supported")
@@ -69,7 +74,7 @@ class AnfisLayer(nn.Module):
         # Apply Gaussian rules
         if self.membership_type == "Gaussian":
             # (batch_size, in_dim, n_rules)
-            membership = torch.exp((-(x - self.centers)**2) / (2 * self.widths**2))
+            membership = gaussian(x, self.centers, self.widths)
 
         elif self.membership_type == "Triangular":
             batch_size = x.shape[0]
@@ -85,7 +90,7 @@ class AnfisLayer(nn.Module):
                 torch.fmin(
                     (x - lefts) / (centers - lefts), (rights - x) / (rights - centers)
                 ),
-                torch.tensor(0.0),
+                self.common_zero,
             )
 
         # If the rules are going to be normalized
