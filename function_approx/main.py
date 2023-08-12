@@ -21,9 +21,9 @@ def dccn(tensor):
 def main() -> int:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = nn.Sequential(
-        nn.Linear(1, 10),
-        nn.Linear(10, 1),
-        AnfisLayer(1, n_rules=8, normalize_rules=False),
+        nn.Linear(1, 20),
+        nn.Linear(20, 1),
+        AnfisLayer(1, n_rules=16, normalize_rules=False, membership_type="Gaussian"),
     ).to(device)
 
     loss_fn = nn.MSELoss()

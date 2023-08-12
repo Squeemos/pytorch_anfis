@@ -7,6 +7,19 @@ from torch import optim
 def gaussian(x, centers, widths):
     return torch.exp((-(x - centers)**2) / (2 * widths**2))
 
+@torch.jit.script
+def triangular(x, lefts, centers, rights, zero):
+    return torch.fmax(
+        torch.fmin(
+            (x - lefts) / (centers - lefts), (rights - x) / (rights - centers)
+        ),
+        zero,
+    )
+
+@torch.jit.script
+def difference_of_sigmoid(x, lefts, rights):
+    return F.sigmoid(x - lefts) - F.sigmoid(x - rights)
+
 class AnfisLayer(nn.Module):
     """
         Module for an AnfisLayer in PyTorch
@@ -20,14 +33,14 @@ class AnfisLayer(nn.Module):
             normalize_rules=True,
         ):
         """
-            in_dim:            The number of inputs for the AnfisLayer*
-            n_rules:           The number of rules for each input
-            membership_type:   The type of rule to use for the AnfisLayer
-            normal_dis_factor: What to multiply the original position of the rules
-            order:             The order of the AnfisLayer. 0 means no additional parameters or biases are used.
-                               1 means there are additional parameters and biases multiplied and added to the input
-            normalize_rules:   Whether to normalize the rules or not. If encountering NaNs or infs, try
-                               not normalizing the rules as it may lead to numerical instability
+            in_dim:                  The number of inputs for the AnfisLayer*
+            n_rules:                 The number of rules for each input
+            membership_type:         The type of rule to use for the AnfisLayer
+            normal_dis_factor:       What to multiply the original position of the rules
+            order:                   The order of the AnfisLayer. 0 means no additional parameters or biases are used.
+                                     1 means there are additional parameters and biases multiplied and added to the input
+            normalize_rules:         Whether to normalize the rules or not. If encountering NaNs or infs, try
+                                     not normalizing the rules as it may lead to numerical instability
 
             *NOTE: The number of input dimensions will match the number of output dimensions.
                    This is because the AnfisLayer will be used at the end of the network. If you want to
@@ -41,19 +54,29 @@ class AnfisLayer(nn.Module):
             # Means (centers) and Standard Deviation (widths)
             self.register_parameter("centers", nn.Parameter(torch.randn(in_dim, n_rules) * normal_dis_factor))
             self.register_parameter("widths", nn.Parameter(torch.rand(in_dim, n_rules) * normal_dis_factor))
+
+            self.membership_function = self.gaussian_membership_function
         elif membership_type == "Triangular":
             # Centers (centers), and left/right points (center +/- width)
             self.register_parameter("centers", nn.Parameter(torch.randn(in_dim, n_rules) * normal_dis_factor))
             self.register_parameter("left_widths", nn.Parameter(torch.rand(in_dim, n_rules) * normal_dis_factor))
             self.register_parameter("right_widths", nn.Parameter(torch.rand(in_dim, n_rules) * normal_dis_factor))
             self.register_buffer("common_zero", torch.tensor(0.0))
+
+            self.membership_function = self.triangular_membership_function
+        elif membership_type == "Difference of Sigmoid":
+            self.register_parameter("lefts", nn.Parameter(torch.randn(in_dim, n_rules) * normal_dis_factor))
+            self.register_parameter("rights", nn.Parameter(self.lefts.clone() + torch.rand(in_dim, n_rules)))
+
+            self.membership_function = self.difference_of_sigmoid_membership_function
         else:
             # TODO: Add in other membership functions
             raise NotImplementedError(f"AnfisLayer with membership type <{self.membership_type}> is not supported")
             return -1
 
-        self.order = order
-        if order == 1:
+        if order == 0:
+            pass
+        elif order == 1:
             # Learning parameters
             # Jang paper
             self.register_parameter("params", nn.Parameter(torch.randn(in_dim, n_rules) * normal_dis_factor))
@@ -64,6 +87,25 @@ class AnfisLayer(nn.Module):
         self.n_rules = n_rules
         self.normalize_rules = normalize_rules
         self.in_dim = in_dim
+        self.order = order
+
+    def gaussian_membership_function(self, x):
+        return torch.exp((-(x - self.centers)**2) / (2 * self.widths**2))
+
+    def triangular_membership_function(self, x):
+        batch_size = x.shape[0]
+        # Get right/left points of the triangles
+        # (batch_size, in_dim, n_rules)
+        lefts = (self.centers - self.left_widths).expand(batch_size, -1, -1)
+        rights = (self.centers + self.right_widths).expand(batch_size, -1, -1)
+        centers = self.centers.expand(batch_size, -1, -1)
+
+        # Perform the membership function
+        # (batch_size, in_dim, n_rules)
+        return triangular(x, lefts, centers, rights, self.common_zero)
+
+    def difference_of_sigmoid_membership_function(self, x):
+        return difference_of_sigmoid(x, self.lefts, self.rights)
 
     def forward(self, x):
         # Expand for broadcasting with rules
@@ -71,43 +113,23 @@ class AnfisLayer(nn.Module):
         x = x.unsqueeze(-1).expand(-1, -1, self.n_rules)
 
         # Fuzzification
-        # Apply Gaussian rules
-        if self.membership_type == "Gaussian":
-            # (batch_size, in_dim, n_rules)
-            membership = gaussian(x, self.centers, self.widths)
+        # (batch_size, in_dim, n_rules)
+        membership = self.membership_function(x)
 
-        elif self.membership_type == "Triangular":
-            batch_size = x.shape[0]
-            # Get right/left points of the triangles
-            # (batch_size, in_dim, n_rules)
-            lefts = (self.centers - self.left_widths).expand(batch_size, -1, -1)
-            rights = (self.centers + self.right_widths).expand(batch_size, -1, -1)
-            centers = self.centers.expand(batch_size, -1, -1)
-
-            # Perform the membership function
-            # (batch_size, in_dim, n_rules)
-            membership = torch.fmax(
-                torch.fmin(
-                    (x - lefts) / (centers - lefts), (rights - x) / (rights - centers)
-                ),
-                self.common_zero,
-            )
-
+        # Normalization
+        # (batch_size, in_dim, n_rules)
         # If the rules are going to be normalized
         if self.normalize_rules:
-            # Normalize the firing levels
-            # (batch_size, in_dim, n_rules)
             rule_evaluation = membership / membership.sum(dim=-1, keepdim=True)
         else:
-            # (batch_size, in_dim, n_rules)
             rule_evaluation = membership
 
         # Multiply the input by the learnable parameters and add the biases
         # (batch_size, in_dim, n_rules)
-        if self.order == 1:
+        if self.order == 0:
+            defuzz = rule_evaluation
+        elif self.order == 1:
             defuzz = x * self.params + self.biases
-        else:
-            defuzz = x
 
         # Multiply the rules by the fuzzified input
         # (batch_size, in_dim, n_rules)
