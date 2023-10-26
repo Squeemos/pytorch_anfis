@@ -34,13 +34,13 @@ def main() -> int:
     max_y = range_x.max()
     min_y = range_x.min()
 
-    n_rules = 8
+    n_rules = 16
 
     path = Path("model.pt")
     model = nn.Sequential(
-        nn.Linear(1, 10),
-        nn.Linear(10, 1),
-        AnfisLayer(1, n_rules=8),
+        nn.Linear(1, 20),
+        nn.Linear(20, 1),
+        AnfisLayer(1, n_rules=n_rules, normalize_rules=False, membership_type="Gaussian"),
     ).to(device)
     model.load_state_dict(torch.load(path))
     model.eval()

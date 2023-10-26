@@ -29,8 +29,8 @@ def main() -> int:
     loss_fn = nn.MSELoss()
     optimizer = optim.AdamW(model.parameters(), lr=.01)
 
-    training_its = 4_000
-    training_size = 100
+    training_its = 8_000
+    training_size = 1_000
     testing_size = 1_000
     domain = 8
 
